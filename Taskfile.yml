@@ -1,0 +1,330 @@
+version: '3'
+
+env:
+  CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY: "ghcr.io/pierrebeucher/cloudypad"
+  CLOUDYPAD_BUILD_CORE_IMAGE_TAG: "local"
+  CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY: "ghcr.io/pierrebeucher/cloudypad/sunshine"
+  CLOUDYPAD_BUILD_SUNSHINE_IMAGE_TAG: "local"
+
+tasks:
+
+  #
+  # Build and test
+  #
+
+  test-unit:
+    cmd: npx mocha --config test/unit/.mocharc.json ./test/unit --recursive
+
+  build-npm:
+    cmds:
+    - npm run build
+
+  build-npm-tar:
+    cmds:
+    - task: build-npm
+    - (cd dist && npm pack)
+  
+  test-compile:
+    cmds:
+    - npx tsc
+
+  #
+  # Local development
+  #
+
+  # For faster development workflow, build and import Sunshine image into dev VM
+  # - Build image locally as tar archive
+  # - Copy image to dev VM
+  # - Import image into dev VM
+  # - Run Sunshine container in dev VM
+  # Note: might as well use a bind mount from host to dev VM instead of scp
+  dev-docker-sunshine-to-vm:
+    cmds: 
+    - task: build-sunshine-container-local
+    - >
+      docker image save $CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_TAG -o tmp/sunshine-container-image.tar
+    - scp -i .vagrant/machines/default/virtualbox/private_key tmp/sunshine-container-image.tar vagrant@192.168.56.43:/tmp
+    - ssh -i .vagrant/machines/default/virtualbox/private_key vagrant@192.168.56.43 docker load -i /tmp/sunshine-container-image.tar
+    - ansible-playbook -i ansible/inventories/dev-vagrant.yml ansible/sunshine.yml -t sunshine-docker
+    - ssh -i .vagrant/machines/default/virtualbox/private_key vagrant@192.168.56.43 
+      docker compose -f sunshine/docker-compose.yml -p sunshine up -d
+
+  # Quick dev build + deploy for rapid Sunshine container feedback loop
+  dev-ansible-config:
+    cmds:
+    - ansible-playbook -i ansible/inventories/dev-vagrant.yml ansible/sunshine.yml
+  
+  dev-ansible-config-with-docker:
+    cmds:
+    - task: dev-docker-sunshine-to-vm
+    - task: dev-ansible-config
+    - vagrant ssh -c "docker restart cloudy"
+
+  dev-docker-sunshine-build-push-image:
+    cmds:
+    - task: build-sunshine-container-local
+    - docker tag $CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_TAG $CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:dev
+    - docker push $CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:dev
+
+  dev-docker-core-build-push-image:
+    cmds:
+    - task: build-core-container-local
+    - docker tag $CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_CORE_IMAGE_TAG $CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:dev
+    - docker push $CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:dev
+
+  #
+  # Tests
+  #
+
+  # Detect potential circular deps with Madge
+  test-circular-deps:
+    cmd: npx -y madge --ts-config ./tsconfig.json -c .
+
+  test-integ-stable:
+    cmds:
+    - task: test-integ-s3-side-effects
+    - task: test-integ-provider-dummy
+    - task: test-integ-provider-scaleway
+    - task: test-integ-provider-aws
+    - task: test-integ-provider-azure
+    - task: test-integ-provider-gcp
+    - task: test-integ-provider-paperspace
+
+  # Setup containers for integration tests
+  test-integ-containers-setup:
+    cmds:
+    - docker compose -f test/integ/docker-compose.yml up -d
+
+  # Run side-effects tests
+  test-integ-s3-side-effects:
+    cmds:
+    - task: test-integ-containers-setup
+    - npx mocha --config test/integ/.mocharc.json ./test/integ/stable/core/state/side-effects/s3.spec.ts
+
+  test-integ-provider-aws:
+    cmds:
+    - npx mocha --config test/integ/.mocharc.json ./test/integ/stable/core/providers/aws/client.spec.ts
+    - npx mocha --config test/integ/.mocharc.json ./test/integ/stable/core/providers/aws/lifecycle.spec.ts 
+
+  test-integ-provider-scaleway:
+    cmds:
+    - npx mocha --config test/integ/.mocharc.json ./test/integ/stable/core/providers/scaleway/client.spec.ts
+    - npx mocha --config test/integ/.mocharc.json ./test/integ/stable/core/providers/scaleway/lifecycle.spec.ts 
+
+  test-integ-provider-azure:
+    cmds:
+    - npx mocha --config test/integ/.mocharc.json ./test/integ/stable/core/providers/azure/client.spec.ts
+    - npx mocha --config test/integ/.mocharc.json ./test/integ/stable/core/providers/azure/lifecycle.spec.ts 
+
+  test-integ-provider-gcp:
+    cmds:
+    - npx mocha --config test/integ/.mocharc.json ./test/integ/stable/core/providers/gcp/lifecycle.spec.ts 
+
+  test-integ-provider-paperspace:
+    cmds:
+    - npx mocha --config test/integ/.mocharc.json ./test/integ/stable/core/providers/paperspace/client.spec.ts
+    - npx mocha --config test/integ/.mocharc.json ./test/integ/stable/core/providers/paperspace/lifecycle.spec.ts 
+
+  test-integ-provider-dummy:
+    cmds:
+    - npx mocha --config test/integ/.mocharc.json ./test/integ/stable/core/providers/dummy/lifecycle.spec.ts 
+
+  test-integ-full-lifecycle-all:
+    cmds:
+    - task: test-integ-full-lifecycle-aws
+    - task: test-integ-full-lifecycle-azure
+    - task: test-integ-full-lifecycle-gcp
+    - task: test-integ-full-lifecycle-paperspace
+    - task: test-integ-full-lifecycle-scaleway
+
+  test-integ-full-lifecycle-aws:
+    - test/integ/cli-full-lifecycle/run.sh aws
+
+  test-integ-full-lifecycle-azure:
+    - test/integ/cli-full-lifecycle/run.sh azure
+
+  test-integ-full-lifecycle-gcp:
+    - test/integ/cli-full-lifecycle/run.sh gcp
+
+  test-integ-full-lifecycle-paperspace:
+    - test/integ/cli-full-lifecycle/run.sh paperspace
+
+  test-integ-full-lifecycle-scaleway:
+    - test/integ/cli-full-lifecycle/run.sh scaleway
+
+  test-integ-scaleway-lifecycle-with-server-deletion:
+    - npx mocha --config test/integ/.mocharc.json ./test/integ/scaleway/lifecycle-with-server-deletion.spec.ts 
+
+  # Ensure analytics key are matching in various places in code 
+  test-analytics-key-match:
+    - cmd: test/shell/test-matching-analytics-key.sh
+
+  # Ensure install script is working
+  test-install-script:
+    - cmd: test/shell/test-install.sh
+
+  # Smoke test to check container image is working
+  test-container-smoke-test:
+    cmds:
+    - task: build-core-container-local
+    - docker run $CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_CORE_IMAGE_TAG --version
+    - >-
+      [ $(docker run $CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_CORE_IMAGE_TAG --version) = $(cat package.json | jq .version -r) ] 
+      || echo "Version in container image doesn't match package.json version"
+
+  #
+  # Utils
+  #
+
+  mdbook-serve:
+    dir: docs
+    cmd: mdbook serve
+
+  # Generate Typescript Paperspace client from OpenAPI specifications
+  paperspace-client-gen:
+    vars:
+      PAPERSPACE_OPENAPI_DIR: "src/providers/paperspace/client/openapi"
+      PAPERSPACE_GENERATED_DIR: "src/providers/paperspace/client/generated-api"
+    cmds:
+    - curl https://api.paperspace.com/v1/openapi.json -o {{ .PAPERSPACE_OPENAPI_DIR }}/openapi.json
+
+    # Filter only machine-related operations
+    # Our client doesn't need the rest for now
+    - >-
+      cat {{ .PAPERSPACE_OPENAPI_DIR }}/openapi.json | jq '{ openapi, info, servers, components, externalDocs, paths: { 
+        "/auth/session": .paths."/auth/session",
+        "/public-ips": .paths."/public-ips",
+        "/public-ips/{ip}": .paths."/public-ips/{ip}",
+        "/machines": .paths."/machines",
+        "/machines/{id}": .paths."/machines/{id}",
+        "/machines/{id}/restart": .paths."/machines/{id}/restart",
+        "/machines/{id}/start": .paths."/machines/{id}/start",
+        "/machines/{id}/stop": .paths."/machines/{id}/stop",
+      }}' > {{ .PAPERSPACE_OPENAPI_DIR }}/machines-only.json
+    
+    # # Cleanup old files before generation
+    - rm -rf {{ .PAPERSPACE_GENERATED_DIR }} || true
+
+    # Run generator
+    - >- 
+      podman run -it --rm -v $PWD:/local -w /local docker.io/openapitools/openapi-generator-cli:latest@sha256:6747991566e4c3e43a30d5982f21da08c1cad78e95093fab04f494687b341788 generate
+      -i {{ .PAPERSPACE_OPENAPI_DIR }}/machines-only.json
+      --skip-validate-spec
+      -g typescript-axios
+      -o {{ .PAPERSPACE_GENERATED_DIR }}
+
+  #
+  # Build
+  #
+  #
+  # Build Core and Sunshine containers
+  # - local: inline cache, no push
+  # - ci: use and push cache, but don't push image itself
+  # - release: use cache, push final image
+
+  # Core
+
+  build-core-container-local:
+    cmds:
+    - >
+      docker buildx build . 
+      --cache-from type=local,src=./tmp/core-container.cache.tgz
+      --cache-to type=inline
+      --cache-to type=local,dest=./tmp/core-container.cache.tgz
+      -t $CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_CORE_IMAGE_TAG
+      --load
+
+  build-core-container-ci:
+    cmds:
+    - >
+      docker buildx build . 
+      --cache-from type=registry,ref=$CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_CORE_IMAGE_TAG-cache
+      --cache-from type=registry,ref=$CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:master-cache
+      --cache-to type=registry,ref=$CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_CORE_IMAGE_TAG-cache
+      -t $CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_CORE_IMAGE_TAG
+      --load
+
+  # Push currently built core container image as "dev" tag
+  build-core-container-push-current-as-dev:
+    cmds:
+    - >-
+      docker tag 
+      $CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_CORE_IMAGE_TAG 
+      $CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:dev
+    - docker push $CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:dev
+
+
+  # Build and push core container image for release with required labels and target architectures
+  # Image labels are important for some processing (eg. cleanup), don't remove them
+  build-core-container-release:
+    vars:
+      CLOUDYPAD_VERSION:
+        sh: jq -r .version package.json
+    cmds:
+    - >
+      if [ -z "{{ .CLOUDYPAD_VERSION }}" ]; then
+        echo "CLOUDYPAD_VERSION={{ .CLOUDYPAD_VERSION }}"
+        echo "CLOUDYPAD_VERSION not set. It should have been set from package.json - this is certainly a bug."
+        exit 1
+      fi
+    - >
+      docker buildx build . 
+      --cache-from type=registry,ref=$CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_CORE_IMAGE_TAG-cache
+      --cache-from type=registry,ref=$CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:master-cache
+      -t $CLOUDYPAD_BUILD_CORE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_CORE_IMAGE_TAG
+      --platform "linux/amd64,linux/arm64"
+      --label "cloudypad.version={{ .CLOUDYPAD_VERSION }}"
+      --push
+
+  # Sunshine
+
+  build-sunshine-container-local:
+    cmds:
+    - >
+      docker buildx build containers/sunshine/ 
+      --cache-from type=local,src=./tmp/sunshine-container.cache.tgz
+      --cache-to type=inline
+      --cache-to type=local,dest=./tmp/sunshine-container.cache.tgz
+      -t $CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_TAG
+      --load
+
+  build-sunshine-container-ci:
+    cmds:
+    - >
+      docker buildx build containers/sunshine/ 
+      --cache-from type=registry,ref=$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_TAG-cache
+      --cache-from type=registry,ref=$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:master-cache
+      --cache-to type=registry,ref=$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_TAG-cache
+      -t $CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_TAG
+      --load
+  
+  # Push currently built Sunshine image as "dev" tag
+  build-sunshine-container-push-current-as-dev:
+    cmds:
+    - >-
+      docker tag 
+      $CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_TAG 
+      $CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:dev
+    - docker push $CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:dev
+
+  build-sunshine-container-release:
+    cmds:
+    - >
+      docker buildx build containers/sunshine/ 
+      --cache-from type=registry,ref=$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_TAG-cache
+      --cache-from type=registry,ref=$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:master-cache
+      -t $CLOUDYPAD_BUILD_SUNSHINE_IMAGE_REGISTRY:$CLOUDYPAD_BUILD_SUNSHINE_IMAGE_TAG
+      --push
+
+  #
+  # Release
+  #
+
+  release-check-version:
+    cmds:
+    - >
+      [[ -z "{{ .CLOUDYPAD_RELEASE_VERSION }}" ]] && echo "CLOUDYPAD_RELEASE_VERSION not set" && exit 1 || true
+
+  
+  release-create:
+    cmd: ./hack/release-create.sh

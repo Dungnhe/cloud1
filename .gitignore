@@ -1,0 +1,13 @@
+tmp/
+.pnpm-store
+pulumi/aws/Pulumi.*.yaml
+**/node_modules
+**/dist
+result 
+
+# test tmp dirs
+test/unit/core/state/TMP-v0-root-data-dir
+.vagrant
+**/__pycache__
+**/.venv
+test/integ/.data-root-dir
